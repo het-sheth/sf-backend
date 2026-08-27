@@ -1,6 +1,51 @@
+import base64
+import binascii
+import re
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, field_validator
+
+
+_MAX_PHOTO_BYTES = 2 * 1024 * 1024
+_PHOTO_DATA_URL = re.compile(
+    r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]*={0,2})"
+)
+_PHOTO_SIGNATURES = {
+    "image/jpeg": lambda data: data.startswith(b"\xff\xd8\xff"),
+    "image/png": lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"),
+    "image/webp": lambda data: data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+}
+
+
+def validate_photo(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    match = _PHOTO_DATA_URL.fullmatch(value)
+    if match is None:
+        raise ValueError("Photo must be a JPEG, PNG, or WebP base64 data URL")
+
+    mime_type, encoded = match.groups()
+    padding = len(encoded) - len(encoded.rstrip("="))
+    decoded_size = (len(encoded) // 4) * 3 - padding
+    if decoded_size > _MAX_PHOTO_BYTES:
+        raise ValueError("Photo must be 2 MiB or smaller")
+
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("Photo contains malformed base64 data") from error
+
+    if base64.b64encode(decoded).decode("ascii") != encoded:
+        raise ValueError("Photo base64 data must use canonical encoding")
+    if not decoded:
+        raise ValueError("Photo must not be empty")
+    if len(decoded) > _MAX_PHOTO_BYTES:
+        raise ValueError("Photo must be 2 MiB or smaller")
+    if not _PHOTO_SIGNATURES[mime_type](decoded):
+        raise ValueError("Photo content does not match its declared MIME type")
+
+    return value
 
 
 class ContactBase(BaseModel):
@@ -69,6 +114,13 @@ class ContactBase(BaseModel):
         description="Free-form notes about the contact. No length limit.",
         examples=["Met at the SF hackathon."],
     )
+    photo: str | None = Field(
+        default=None,
+        description=(
+            "Optional JPEG, PNG, or WebP image as a base64 data URL; "
+            "decoded content is limited to 2 MiB."
+        ),
+    )
 
 
 _FULL_EXAMPLE = {
@@ -84,6 +136,11 @@ _FULL_EXAMPLE = {
     "postal_code": "94105",
     "country": "USA",
     "notes": "Met at the SF hackathon.",
+    "photo": (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ),
 }
 _MINIMAL_EXAMPLE = {"first_name": "Grace", "last_name": "Hopper", "email": "grace@example.com"}
 
@@ -92,6 +149,7 @@ class ContactCreate(ContactBase):
     """Body of `POST /api/v1/contacts`. Only the two names and email are required."""
 
     model_config = ConfigDict(json_schema_extra={"examples": [_FULL_EXAMPLE, _MINIMAL_EXAMPLE]})
+    _validate_photo = field_validator("photo")(validate_photo)
 
 
 class ContactReplace(ContactBase):
@@ -103,6 +161,7 @@ class ContactReplace(ContactBase):
     """
 
     model_config = ConfigDict(json_schema_extra={"examples": [_FULL_EXAMPLE]})
+    _validate_photo = field_validator("photo")(validate_photo)
 
 
 class ContactUpdate(BaseModel):
@@ -134,6 +193,12 @@ class ContactUpdate(BaseModel):
     postal_code: str | None = Field(default=None, max_length=20, description="New postal code.")
     country: str | None = Field(default=None, max_length=120, description="New country.")
     notes: str | None = Field(default=None, description="New notes; replaces the existing text.")
+    photo: str | None = Field(
+        default=None,
+        description="New JPEG, PNG, or WebP base64 data URL; null clears the current photo.",
+    )
+
+    _validate_photo = field_validator("photo")(validate_photo)
 
 
 class ContactRead(ContactBase):

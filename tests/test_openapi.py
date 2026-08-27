@@ -134,6 +134,14 @@ def test_contact_fields_are_described_and_have_examples(spec):
     assert schema["properties"]["full_name"]["description"]
 
 
+def test_photo_is_documented_on_contact_schemas(spec):
+    schemas = spec["components"]["schemas"]
+    for schema_name in ("ContactCreate", "ContactReplace", "ContactUpdate", "ContactRead"):
+        photo = schemas[schema_name]["properties"]["photo"]
+        assert photo["description"]
+        assert {option.get("type") for option in photo["anyOf"]} == {"string", "null"}
+
+
 def test_request_bodies_carry_examples(spec):
     create = spec["components"]["schemas"]["ContactCreate"]
     assert len(create["examples"]) == 2
